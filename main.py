@@ -4,7 +4,7 @@ from typing import Generator
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import URL, create_engine, make_url, select
+from sqlalchemy import URL, String, create_engine, make_url, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -17,8 +17,8 @@ class Item(Base):
     __tablename__ = "items"
 
     id: Mapped[int] = mapped_column(primary_key=True, index=True)
-    name: Mapped[str] = mapped_column(nullable=False)
-    description: Mapped[str | None] = mapped_column(nullable=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(255), nullable=False)
 
 
 class ItemCreate(BaseModel):
@@ -44,7 +44,9 @@ def create_app(database_url: str | None = None) -> FastAPI:
         )
 
     engine_options = {}
-    parsed_url = make_url(database_url) if isinstance(database_url, str) else database_url
+    parsed_url = (
+        make_url(database_url) if isinstance(database_url, str) else database_url
+    )
     if parsed_url.drivername.startswith("sqlite"):
         engine_options["connect_args"] = {"check_same_thread": False}
         if parsed_url.database in (None, "", ":memory:"):
@@ -85,14 +87,18 @@ def create_app(database_url: str | None = None) -> FastAPI:
     def get_item(item_id: int, db: Session = Depends(get_db)) -> Item:
         item = db.get(Item, item_id)
         if item is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
+            )
         return item
 
     @app.delete("/items/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
     def delete_item(item_id: int, db: Session = Depends(get_db)) -> None:
         item = db.get(Item, item_id)
         if item is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
+            )
         db.delete(item)
         db.commit()
 
