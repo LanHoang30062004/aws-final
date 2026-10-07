@@ -139,7 +139,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
-        return app
+    return app
 
 
 app = create_app()
