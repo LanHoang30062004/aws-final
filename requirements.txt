@@ -5,3 +5,5 @@ PyMySQL==1.1.1
 pytest==8.3.5
 httpx==0.28.1
 cryptography
+boto3
+python-multipart

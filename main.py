@@ -1,12 +1,18 @@
 import os
 from contextlib import asynccontextmanager
 from typing import Generator
-
+import boto3
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import URL, String, create_engine, make_url, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 from sqlalchemy.pool import StaticPool
+
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "fastapi-app-storage-lanhoang-2026")
+AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-1")
+
+# Boto3 tự động nhận quyền từ EC2 IAM Role (không cần truyền access_key/secret_key)
+s3_client = boto3.client("s3", region_name=AWS_REGION)
 
 
 class Base(DeclarativeBase):

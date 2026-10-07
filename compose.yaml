@@ -10,4 +10,6 @@ services:
       MYSQL_DATABASE: ${MYSQL_DATABASE:-app_db}
       MYSQL_USER: ${MYSQL_USER:-app_user}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME}
+      AWS_REGION: ${AWS_REGION:-ap-southeast-1}
     restart: unless-stopped
