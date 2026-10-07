@@ -67,7 +67,7 @@ def create_app(database_url: str | None = None) -> FastAPI:
         with session_factory() as session:
             yield session
 
-    @app.get("/health")
+    @app.get("/")
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
