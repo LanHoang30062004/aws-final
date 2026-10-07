@@ -1,8 +1,9 @@
+from csv import Error
 import os
 from contextlib import asynccontextmanager
 from typing import Generator
 import boto3
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import URL, String, create_engine, make_url, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -112,7 +113,33 @@ def create_app(database_url: str | None = None) -> FastAPI:
         db.delete(item)
         db.commit()
 
-    return app
+    @app.post("/upload")
+    async def upload_file_to_s3(file: UploadFile = File(...)):
+        try:
+            # Đường dẫn/tên file lưu trên S3
+            s3_key = f"uploads/{file.filename}"
+
+            # Upload luồng file trực tiếp lên S3
+            s3_client.upload_fileobj(
+                file.file,
+                S3_BUCKET_NAME,
+                s3_key,
+                ExtraArgs={"ContentType": file.content_type},
+            )
+
+            return {
+                "status": "success",
+                "message": "File uploaded successfully!",
+                "bucket": S3_BUCKET_NAME,
+                "file_key": s3_key,
+                "file_url": f"https://{S3_BUCKET_NAME}.s3.{AWS_REGION}.amazonaws.com/{s3_key}",
+            }
+        except Error as e:
+            raise HTTPException(status_code=500, detail=f"S3 upload error: {str(e)}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        return app
 
 
 app = create_app()
