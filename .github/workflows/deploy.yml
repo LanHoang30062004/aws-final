@@ -33,64 +33,94 @@ jobs:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     env:
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-      EC2_HOST: ${{ secrets.EC2_HOST }}
-      EC2_USER: ${{ secrets.EC2_USER }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        run: |
+          IMAGE="$DOCKERHUB_USERNAME/fastapi-mysql:${GITHUB_SHA}"
+          docker build --tag "$IMAGE" .
+          docker push "$IMAGE"
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: Log in to Amazon ECR
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push image
-        id: image
+      - name: Deploy on EC2 through SSM
         env:
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          EC2_INSTANCE_ID: ${{ secrets.EC2_INSTANCE_ID }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build --tag "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          set -euo pipefail
 
-      - name: Add EC2 SSH key
-        env:
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-        run: |
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/ec2_key
-          chmod 600 ~/.ssh/ec2_key
-          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+          if [[ ! "$DOCKERHUB_USERNAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+            echo "DOCKERHUB_USERNAME contains unsupported characters."
+            exit 1
+          fi
 
-      - name: Copy Compose file
-        run: |
-          ssh -i ~/.ssh/ec2_key "$EC2_USER@$EC2_HOST" \
-            'mkdir -p /opt/fastapi-mysql-app'
-          scp -i ~/.ssh/ec2_key compose.yaml \
-            "$EC2_USER@$EC2_HOST:/opt/fastapi-mysql-app/compose.yaml"
+          COMPOSE_B64="$(base64 -w 0 compose.yaml)"
+          DEPLOY_SCRIPT="$(cat <<EOF
+          set -euo pipefail
+          APP_DIR=/opt/fastapi-mysql-app
+          mkdir -p "\$APP_DIR"
+          printf '%s' '$COMPOSE_B64' | base64 -d > "\$APP_DIR/compose.yaml"
+          cd "\$APP_DIR"
+          export DOCKERHUB_USERNAME='$DOCKERHUB_USERNAME'
+          export IMAGE_TAG='$IMAGE_TAG'
+          docker compose --env-file .env -f compose.yaml pull app
+          docker compose --env-file .env -f compose.yaml up -d --no-build --remove-orphans
+          docker image prune -af --filter 'until=72h'
+          echo "Deployment completed successfully."
+          EOF
+          )"
+          ENCODED_SCRIPT="$(printf '%s' "$DEPLOY_SCRIPT" | base64 -w 0)"
 
-      - name: Deploy on EC2
-        env:
-          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          ssh -i ~/.ssh/ec2_key "$EC2_USER@$EC2_HOST" \
-            "cd /opt/fastapi-mysql-app && \
-            export ECR_REGISTRY='$ECR_REGISTRY' \
-              ECR_REPOSITORY='$ECR_REPOSITORY' IMAGE_TAG='$IMAGE_TAG' && \
-            aws ecr get-login-password --region '$AWS_REGION' | \
-              docker login --username AWS --password-stdin '$ECR_REGISTRY' && \
-            docker compose --env-file .env -f compose.yaml pull app && \
-            docker compose --env-file .env -f compose.yaml up -d --no-build"
+          COMMAND_ID="$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy commit $IMAGE_TAG via GitHub Actions" \
+            --parameters "commands=[\"echo $ENCODED_SCRIPT | base64 -d | bash\"]" \
+            --query "Command.CommandId" \
+            --output text)"
+
+          echo "SSM command sent: $COMMAND_ID"
+          if ! aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$EC2_INSTANCE_ID"; then
+            echo "SSM command did not complete successfully; retrieving execution details."
+          fi
+
+          STATUS="$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query "Status" \
+            --output text)"
+          echo "Command status: $STATUS"
+          echo "Deployment output:"
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$EC2_INSTANCE_ID" \
+            --query "StandardOutputContent" \
+            --output text
+
+          if [[ "$STATUS" != "Success" ]]; then
+            echo "Deployment error output:"
+            aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --query "StandardErrorContent" \
+              --output text
+            exit 1
+          fi

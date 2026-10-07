@@ -28,45 +28,42 @@ pytest -q
 
 Test dùng SQLite tạm thời; MySQL không cần thiết để chạy test.
 
-## GitHub Actions → Amazon ECR → EC2
+## GitHub Actions → Docker Hub → EC2 private subnet (SSM)
 
-Workflow `.github/workflows/deploy.yml` chạy test với mọi pull request vào `main`. Khi có push vào `main`, nó tạo image, đẩy image lên ECR và deploy qua SSH. Image được gắn tag bằng commit SHA. AWS access key chỉ được dùng trong GitHub Actions; EC2 lấy quyền đọc ECR qua instance profile.
+Workflow `.github/workflows/deploy.yml` chạy test với pull request vào `main`. Khi push vào `main`, workflow đẩy image lên Docker Hub rồi deploy qua AWS Systems Manager (SSM) Run Command bằng AWS IAM access key. Image được gắn tag bằng commit SHA; deploy không cần SSH inbound hay public IP trên EC2.
 
 ### GitHub repository configuration
 
-Tạo repository ECR trước và thêm các GitHub **Variables**:
-
-- `AWS_REGION`: AWS region, ví dụ `ap-southeast-1`
-- `ECR_REPOSITORY`: tên ECR repository
+Tạo repository `fastapi-mysql` trên Docker Hub. Tên repository đã được cố định trong workflow và `compose.yaml`, nên không cần GitHub Variable cho repository.
 
 Thêm các GitHub **Secrets**:
 
-- `AWS_ACCESS_KEY_ID`: access key có quyền push image lên ECR (nên giới hạn quyền vào đúng repository)
-- `AWS_SECRET_ACCESS_KEY`: secret tương ứng
-- `EC2_HOST`: public DNS hoặc IP của EC2
-- `EC2_USER`: SSH user, ví dụ `ubuntu` hoặc `ec2-user`
-- `EC2_SSH_KEY`: private SSH key dạng PEM, giữ nguyên các dòng BEGIN/END
+- `DOCKERHUB_USERNAME`: tên tài khoản Docker Hub; workflow dùng secret này cả khi đăng nhập lẫn đặt namespace image
+- `DOCKERHUB_TOKEN`: Docker Hub access token có quyền push vào repository
+- `AWS_ACCESS_KEY_ID`: access key của IAM user chỉ dành cho CI/CD
+- `AWS_SECRET_ACCESS_KEY`: secret key tương ứng
+- `AWS_REGION`: AWS region của EC2, ví dụ `ap-southeast-1`
+- `EC2_INSTANCE_ID`: instance ID của EC2, ví dụ `i-0123456789abcdef0`
 
-Nếu bạn đang có tên secret theo cách ghi `aws_access_key`, `aws_secret_access_key`, `ec2_host`, hoặc `ec2_ssh_key`, hãy đổi tên thành các tên mà workflow tham chiếu ở trên hoặc sửa tham chiếu workflow cho khớp. Không đặt giá trị bí mật trong GitHub Variables hoặc trong repository.
+Không cần tạo GitHub Variables cho Docker Hub. Không đặt token hoặc private key trong repository.
 
-### Chuẩn bị EC2 một lần
+### Cấu hình IAM và SSM
 
-1. Cài Docker Engine, Docker Compose plugin và AWS CLI trên EC2.
-2. Gắn IAM instance profile có quyền `ecr:GetAuthorizationToken` và quyền pull (tối thiểu `ecr:BatchCheckLayerAvailability`, `ecr:GetDownloadUrlForLayer`, `ecr:BatchGetImage`) với đúng ECR repository. Không cần chép AWS access key CI lên EC2.
-3. Mở inbound TCP port `22` chỉ từ IP runner/địa chỉ quản trị phù hợp, và mở port `8000` nếu cần truy cập API trực tiếp.
-4. Tạo `/opt/fastapi-mysql-app/.env` trên EC2 với nội dung sau. Thay các giá trị theo tài khoản, region, ECR repository của bạn; dùng mật khẩu DB mạnh:
+1. Tạo IAM user riêng cho CI/CD, không dùng root user, rồi tạo access key. Lưu access key và secret key dưới GitHub Secrets như trên.
+2. Cấp IAM user quyền tối thiểu dùng SSM: `ssm:SendCommand` cho đúng EC2 instance và document `AWS-RunShellScript`, cùng `ssm:GetCommandInvocation` để workflow chờ và đọc kết quả. Tránh cấp `AdministratorAccess`.
+3. Gắn IAM instance profile có policy `AmazonSSMManagedInstanceCore` vào EC2. SSM Agent phải hoạt động và instance cần kết nối outbound tới Systems Manager (qua NAT Gateway hoặc VPC endpoints SSM phù hợp).
+4. Cài Docker Engine và Docker Compose plugin trên EC2. Đặt Docker Hub repository ở chế độ **public** để không cần đăng nhập Docker Hub trên EC2; nếu repository private, cần cấu hình credential chỉ có quyền pull trên EC2.
+5. Tạo `/opt/fastapi-mysql-app/.env` trên EC2 với nội dung sau và mật khẩu DB mạnh:
 
    ```dotenv
-   ECR_REGISTRY=123456789012.dkr.ecr.ap-southeast-1.amazonaws.com
-   ECR_REPOSITORY=fastapi-mysql
    MYSQL_DATABASE=app_db
    MYSQL_USER=app_user
    MYSQL_PASSWORD=replace-with-a-strong-password
    MYSQL_ROOT_PASSWORD=replace-with-another-strong-password
    ```
 
-   Bảo vệ tệp bằng `chmod 600 /opt/fastapi-mysql-app/.env`.    GitHub Actions sẽ tải `compose.yaml` lên cùng thư mục và khởi động ứng dụng cùng MySQL. Cùng một file Compose hỗ trợ local (build từ Dockerfile) lẫn deploy production (dùng image ECR).
+   Bảo vệ tệp bằng `chmod 600 /opt/fastapi-mysql-app/.env`. Workflow chuyển `compose.yaml` tới EC2 qua SSM, sau đó pull image và khởi động ứng dụng cùng MySQL.
 
-5. Tạo ECR repository tương ứng trước khi chạy workflow. `AWS_ACCESS_KEY_ID` và `AWS_SECRET_ACCESS_KEY` phải có quyền push image vào đó.
+6. Đảm bảo EC2 có outbound internet hoặc route phù hợp để kéo image Docker Hub và image MySQL.
 
-Sau khi deploy, API lắng nghe trên port `8000`. Dữ liệu MySQL nằm trong Docker volume `mysql_data`; không xóa volume khi cập nhật ứng dụng.
+Không cần mở inbound port `22` hoặc đặt EC2 trong public subnet. AWS access key/secret key cho phép GitHub Actions gọi AWS SSM API, nhưng không tự tạo kết nối mạng tới EC2; SSM Agent, instance profile và kết nối outbound vẫn bắt buộc. Để truy cập API từ bên ngoài VPC, cấu hình ALB/NLB, VPN hoặc một đường truy cập riêng phù hợp. API lắng nghe trên port `8000`.
