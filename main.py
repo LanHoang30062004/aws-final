@@ -68,6 +68,10 @@ def create_app(database_url: str | None = None) -> FastAPI:
             yield session
 
     @app.get("/")
+    def read_root():
+        return {"status": "ok"}
+
+    @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
